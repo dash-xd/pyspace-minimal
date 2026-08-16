@@ -1,0 +1,185 @@
+name: Router
+description: >-
+  Points this shell at a set of routes (the default built-in health
+  check, or a remote register(app)-providing Python package) by
+  regenerating routersource/source.py and requirements.txt's
+  router-package line via tools/genrouter.py, then optionally runs the
+  prepped Flask app locally via the functions-framework dev server.
+  Pair run-local with the run-local-stop action once done with it.
+
+inputs:
+  router-source:
+    description: >-
+      Which routes to wire in. "default" resets source.py to the
+      built-in health check with no external dependency. "remote"
+      points it at router-package/router-module instead.
+    required: false
+    default: "default"
+  router-package:
+    description: >-
+      pip requirement spec that provides router-module, e.g.
+      git+https://github.com/dash-xd/gcp-python-function-inspector.git.
+      Required when router-source is "remote"; ignored otherwise. If
+      router-version is set it's appended to this spec with "@" (git
+      specs) or "==" (plain PyPI package names).
+    required: false
+    default: ""
+  router-module:
+    description: >-
+      Dotted import path of the module exposing register(app), e.g.
+      gcp_python_function_inspector.router. Required when router-source
+      is "remote"; ignored otherwise.
+    required: false
+    default: ""
+  router-version:
+    description: >-
+      Optional version to pin router-package to: a branch, tag, or full
+      commit SHA for a git+ spec, or a version number for a plain PyPI
+      package name. Only used when router-source is "remote". Leave
+      unset to deploy router-package exactly as given (e.g. already
+      pinned to a ref itself, or unpinned to float the package's
+      default resolution).
+    required: false
+    default: ""
+  run-local:
+    description: >-
+      After preparing the routes, also start the app locally in the
+      background (via the functions-framework dev server) and wait for
+      it to accept connections.
+    required: false
+    default: "false"
+  working-directory:
+    description: Directory containing this shell's main.py and requirements.txt.
+    required: false
+    default: "."
+  python-version:
+    description: Python version to set up.
+    required: false
+    default: "3.12"
+  host:
+    description: "run-local only: host/interface to bind to."
+    required: false
+    default: "127.0.0.1"
+  port:
+    description: "run-local only: port to listen on."
+    required: false
+    default: "8080"
+  ready-path:
+    description: >-
+      run-local only: path to probe (with a GET) to detect the server
+      is up. Any HTTP response counts as ready, even an error status -
+      only a connection failure keeps polling - so this doesn't need to
+      be a route the prepped app actually implements.
+    required: false
+    default: "/"
+  ready-timeout-seconds:
+    description: "run-local only: how long to wait for the server to start accepting connections."
+    required: false
+    default: "30"
+
+outputs:
+  base-url:
+    description: >-
+      run-local only: base URL the server is listening on, e.g.
+      http://127.0.0.1:8080
+    value: ${{ steps.start.outputs.base-url }}
+  pid-file:
+    description: >-
+      run-local only: path to a file containing the server's PID, for
+      run-local-stop to kill later.
+    value: ${{ steps.start.outputs.pid-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Validate inputs
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${{ inputs.router-source }}" == "remote" && -z "${{ inputs.router-package }}" ]]; then
+          echo "::error::router-package is required when router-source is 'remote'"
+          exit 1
+        fi
+        if [[ "${{ inputs.router-source }}" == "remote" && -z "${{ inputs.router-module }}" ]]; then
+          echo "::error::router-module is required when router-source is 'remote'"
+          exit 1
+        fi
+
+    - name: Resolve router-package spec
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+        spec="${{ inputs.router-source == 'remote' && inputs.router-package || '' }}"
+        version="${{ inputs.router-version }}"
+        if [[ -n "$spec" && -n "$version" ]]; then
+          if [[ "$spec" == git+* ]]; then
+            spec="${spec}@${version}"
+          else
+            spec="${spec}==${version}"
+          fi
+        fi
+        echo "spec=${spec}" >>"$GITHUB_OUTPUT"
+
+    - name: Regenerate the routersource drop-in
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        python tools/genrouter.py \
+          --router-module="${{ inputs.router-source == 'remote' && inputs.router-module || '' }}" \
+          --router-package="${{ steps.resolve.outputs.spec }}"
+
+    - name: Install dependencies (resolves router-package too, once it's in requirements.txt)
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Verify the shell imports against the resolved routes
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        python -c "import routersource; assert callable(routersource.register)"
+
+    - name: Start server
+      id: start
+      if: ${{ inputs.run-local == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+        READY_PATH: ${{ inputs.ready-path }}
+        READY_TIMEOUT_SECONDS: ${{ inputs.ready-timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        functions-framework --target=main --source=main.py --host="$HOST" --port="$PORT" > localserve.log 2>&1 &
+        pid=$!
+
+        pid_file="$(pwd)/localserve.pid"
+        echo "$pid" > "$pid_file"
+
+        base_url="http://${HOST}:${PORT}"
+
+        for _ in $(seq 1 "$READY_TIMEOUT_SECONDS"); do
+          if curl -s -o /dev/null "${base_url}${READY_PATH}"; then
+            echo "server is up at ${base_url}"
+            echo "base-url=${base_url}" >>"$GITHUB_OUTPUT"
+            echo "pid-file=${pid_file}" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "::error::server never came up on ${base_url}"
+        cat localserve.log >&2 || true
+        exit 1
