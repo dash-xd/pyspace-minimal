@@ -1,4 +1,2 @@
 functions-framework==3.*
-flask
-jinja2
-requests
+.

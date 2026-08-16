@@ -1,22 +1,19 @@
 """Wraps building this Cloud Function's Flask app - via current_app,
 functions-framework's gen 1 trick (see main.py) - its Jinja
-environment (retargeted at this file's directory, since Cloud
-Functions doesn't lay files out like a normal Flask project), and an
-optional hotloaded router, as explicit, independently callable methods
-instead of a sequence of module-level statements.
+environment, and an optional hotloaded router, as explicit,
+independently callable methods instead of a sequence of module-level
+statements.
 """
 import importlib
 import os
-from os import path
 
-import requests
-from flask import current_app, request, jsonify, redirect
+from flask import current_app
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
 class CloudFunctionApp:
     def __init__(self, root=None, router_env_var='ROUTER_MODULE'):
-        self.root = root or path.dirname(path.abspath(__file__))
+        self.root = root
         self.router_env_var = router_env_var
         self.app = None
         self.env = None
@@ -29,8 +26,14 @@ class CloudFunctionApp:
         return self.app
 
     def build_jinja_env(self):
+        """Falls back to the current working directory - which, at
+        runtime, is the Cloud Function's source directory - rather than
+        this package's own install location, since once installed via
+        pip, __file__ would point into site-packages instead of the
+        consuming function's project."""
+        root = self.root or os.getcwd()
         self.env = Environment(
-            loader=FileSystemLoader(self.root),
+            loader=FileSystemLoader(root),
             autoescape=select_autoescape(['html', 'xml', 'htm', '.xhtml', '.svg']),
         )
         return self.env
