@@ -10,16 +10,12 @@ nothing else, so this repo builds, runs, and deploys standalone with
 no external route-providing dependency until something overrides it.
 
 functions-framework builds its own Flask app and pushes that app's
-context before importing this module - that's what makes `current_app`
-resolve to something real here, and letting routersource.register(app)
-add live routes to it via plain `@app.route(...)`. It also still
-requires this module's configured target (see the `entry_point`
-Terraform variable / FUNCTION_TARGET) to be an actual top-level
-function, which is what `main` below is for: functions-framework binds
-it to a catch-all "/" and "/<path:path>" rule, but Werkzeug always
-prefers a literal-path rule over that catch-all, so any request
-matching a route added by routersource.register never reaches it. Only
-requests to paths nothing above claims fall through to it.
+context before importing this module, which is what makes `current_app`
+resolve to something real here. register(app) (see routersource/serve.py)
+attaches whatever routes routersource.source provides directly to that
+app via plain `@app.route(...)`, then hands back the function
+functions-framework's target (entry_point "main") should actually point
+at.
 """
 from os import path
 
@@ -35,8 +31,4 @@ env = Environment(
     autoescape=select_autoescape(["html", "xml", "htm", ".xhtml", ".svg"]),
 )
 
-register(app)
-
-
-def main(request):
-    return "not found", 404
+main = register(app)
