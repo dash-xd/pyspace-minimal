@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 localserve.log
 localserve.pid
+.repo/
+routers/

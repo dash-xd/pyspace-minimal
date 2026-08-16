@@ -2,4 +2,4 @@ functions-framework==3.*
 flask
 jinja2
 requests
-# --- router-package (managed by tools/genrouter.py) ---
+pyyaml

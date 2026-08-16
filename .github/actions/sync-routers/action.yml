@@ -1,0 +1,182 @@
+name: Sync routers
+description: >-
+  Installs the `repo` multi-repo tool
+  (https://gerrit.googlesource.com/git-repo) and uses it, against
+  manifest/default.xml, to fetch/pin every router routers.yaml
+  declares into this shell's routers/ directory - the Python analog of
+  gospace-minimal's router action, but driven by a declarative
+  manifest plus a runtime importlib loader (see main.py) instead of
+  templating a Go import path into generated source. Optionally runs
+  the result locally afterwards via the functions-framework dev
+  server; pair that with the run-local-stop action once done with it.
+
+inputs:
+  revision-overrides:
+    description: >-
+      Optional comma-separated "project-name=revision" pairs (e.g.
+      "gcp-python-function-inspector=some-branch") pinning specific
+      manifest projects to a revision other than what's checked into
+      manifest/default.xml, applied via a repo local manifest
+      (https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md#local-manifests)
+      before syncing.
+    required: false
+    default: ""
+  run-local:
+    description: >-
+      After syncing, also start the app locally in the background (via
+      the functions-framework dev server) and wait for it to accept
+      connections. When false, tools/check_routers.py runs instead as a
+      faster smoke check that every router still imports and registers
+      cleanly.
+    required: false
+    default: "false"
+  working-directory:
+    description: Directory containing this shell's routers.yaml and manifest/.
+    required: false
+    default: "."
+  python-version:
+    description: Python version to set up.
+    required: false
+    default: "3.12"
+  host:
+    description: "run-local only: host/interface to bind to."
+    required: false
+    default: "127.0.0.1"
+  port:
+    description: "run-local only: port to listen on."
+    required: false
+    default: "8080"
+  ready-path:
+    description: >-
+      run-local only: path to probe (with a GET) to detect the server
+      is up. Any HTTP response counts as ready, even an error status -
+      only a connection failure keeps polling - so this doesn't need to
+      be a route any router actually implements.
+    required: false
+    default: "/"
+  ready-timeout-seconds:
+    description: "run-local only: how long to wait for the server to start accepting connections."
+    required: false
+    default: "30"
+
+outputs:
+  base-url:
+    description: >-
+      run-local only: base URL the server is listening on, e.g.
+      http://127.0.0.1:8080
+    value: ${{ steps.start.outputs.base-url }}
+  pid-file:
+    description: >-
+      run-local only: path to a file containing the server's PID, for
+      run-local-stop to kill later.
+    value: ${{ steps.start.outputs.pid-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install repo launcher
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${HOME}/.bin"
+        curl -sS -o "${HOME}/.bin/repo" https://storage.googleapis.com/git-repo-downloads/repo
+        chmod a+rx "${HOME}/.bin/repo"
+        echo "${HOME}/.bin" >>"$GITHUB_PATH"
+
+    - name: Install PyYAML (needed to read routers.yaml/manifest below)
+      shell: bash
+      run: pip install --quiet pyyaml
+
+    - name: repo init
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        manifest="$(python3 -c "import yaml; print(yaml.safe_load(open('routers.yaml'))['manifest'])")"
+        repo init -u "$(pwd)" -m "$manifest" --depth=1
+
+    - name: Apply revision overrides
+      if: ${{ inputs.revision-overrides != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        REVISION_OVERRIDES: ${{ inputs.revision-overrides }}
+      run: |
+        set -euo pipefail
+        mkdir -p .repo/local_manifests
+        {
+          echo '<?xml version="1.0" encoding="UTF-8"?>'
+          echo '<manifest>'
+          IFS=',' read -ra pairs <<<"$REVISION_OVERRIDES"
+          for pair in "${pairs[@]}"; do
+            name="${pair%%=*}"
+            revision="${pair#*=}"
+            echo "  <project name=\"${name}\" revision=\"${revision}\" />"
+          done
+          echo '</manifest>'
+        } > .repo/local_manifests/revision-overrides.xml
+        cat .repo/local_manifests/revision-overrides.xml
+
+    - name: repo sync
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: repo sync -j4 --no-tags --optimized-fetch
+
+    - name: Merge synced routers' requirements.txt
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: python3 tools/merge_requirements.py
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Check routers load cleanly
+      if: ${{ inputs.run-local != 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: python3 tools/check_routers.py
+
+    - name: Start server
+      id: start
+      if: ${{ inputs.run-local == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        HOST: ${{ inputs.host }}
+        PORT: ${{ inputs.port }}
+        READY_PATH: ${{ inputs.ready-path }}
+        READY_TIMEOUT_SECONDS: ${{ inputs.ready-timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        functions-framework --target=main --source=main.py --host="$HOST" --port="$PORT" > localserve.log 2>&1 &
+        pid=$!
+
+        pid_file="$(pwd)/localserve.pid"
+        echo "$pid" > "$pid_file"
+
+        base_url="http://${HOST}:${PORT}"
+
+        for _ in $(seq 1 "$READY_TIMEOUT_SECONDS"); do
+          if curl -s -o /dev/null "${base_url}${READY_PATH}"; then
+            echo "server is up at ${base_url}"
+            echo "base-url=${base_url}" >>"$GITHUB_OUTPUT"
+            echo "pid-file=${pid_file}" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "::error::server never came up on ${base_url}"
+        cat localserve.log >&2 || true
+        exit 1

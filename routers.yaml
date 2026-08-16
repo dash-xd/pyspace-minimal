@@ -1,0 +1,14 @@
+# Declares which routers main.py loads and where each is mounted.
+# `manifest` points at the repo (https://gerrit.googlesource.com/git-repo)
+# manifest tools/sync-routers.sh uses to fetch/pin each router's actual
+# code - this file only maps each already-synced project's local path to
+# the Python module to import and (optionally) a URL prefix to mount it
+# under. `mount: /` (the default - can be omitted) registers a router's
+# routes directly on the app; anything else wraps them in a Flask
+# Blueprint under that prefix instead, so more than one router can share
+# a deployment without their paths colliding.
+manifest: manifest/default.xml
+routers:
+  - path: routers/gcp-python-function-inspector
+    module: gcp_python_function_inspector.router
+    mount: /
