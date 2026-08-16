@@ -1,0 +1,29 @@
+name: Router
+description: >-
+  Adds a router package to requirements.txt so main.py's ROUTER_MODULE
+  hook can import it at request time. The Cloud Function's
+  ROUTER_MODULE environment variable (set alongside this, e.g. in
+  Terraform) is what actually points main.py at it - this action just
+  makes sure the package is installed.
+
+inputs:
+  router-package:
+    description: >-
+      pip requirement spec for the router package, e.g.
+      "git+https://github.com/dash-xd/gcp-python-function-inspector.git@main".
+      Leave empty to deploy with nothing hooked in.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory containing this shell's requirements.txt.
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Add router package to requirements.txt
+      if: ${{ inputs.router-package != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: echo "${{ inputs.router-package }}" >> requirements.txt
