@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cloud-function-app"
+version = "0.1.0"
+description = "Utilities for building Flask applications in Google Cloud Functions"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "Flask>=3.0",
+    "Jinja2>=3.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cloud_function_app"]
