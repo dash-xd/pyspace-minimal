@@ -10,8 +10,9 @@ The package itself contains no application code - it just:
 - obtains `functions-framework`'s Flask app (via `current_app`)
 - builds a Jinja environment rooted at your function's source directory
 - registers a default health-check route
-- dynamically imports and calls `register(app)` on whatever module the
-  `ROUTER_MODULE` environment variable points at
+- dynamically imports whatever module the `ROUTER_MODULE` environment
+  variable points at and layers its `ROUTES` on top, letting a router
+  override the default health check
 
 ## Layout
 
@@ -65,7 +66,7 @@ directory, so the package can't infer your project root on its own.
 ## Composing a router
 
 Set `ROUTER_MODULE` in the function's environment to an importable
-module exposing `register(app)`:
+module exposing `ROUTES`, a `{url_rule: view_func}` dict:
 
 ```
 ROUTER_MODULE=router
@@ -73,17 +74,21 @@ ROUTER_MODULE=router
 
 ```python
 # router.py
-def register(app):
-    @app.route("/hello")
-    def hello():
-        return "hello"
+def hello():
+    return "hello"
 
-    return hello
+ROUTES = {
+    "/hello": hello,
+}
 ```
 
-`CloudFunctionApp.build()` imports that module and calls `register(app)`
-on the Flask app it built, bolting your routes on top of the framework's
-own `/container/run` health check.
+`CloudFunctionApp.build()` merges `ROUTES` on top of the package's own
+`DEFAULT_ROUTES` (just `/container/run`) and registers the result on
+the Flask app it built. A router can add new routes, like `/hello`
+above, or override an existing rule outright - a router that defines
+its own `/container/run` entry replaces the default health check
+instead of colliding with it, since both are merged into one dict
+before anything is registered.
 
 ## Deploying to Google Cloud Functions (gen 1, Python 3.12)
 
