@@ -21,6 +21,7 @@ class CloudFunctionApp:
         self.router_env_var = router_env_var
         self.app = None
         self.env = None
+        self.routes = {}
 
     def build_app(self):
         """functions-framework builds its own Flask app and pushes that
@@ -54,18 +55,32 @@ class CloudFunctionApp:
         return getattr(module, 'ROUTES', {})
 
     def register_routes(self):
-        """Registers DEFAULT_ROUTES, then layers the hotloaded
-        router's routes on top - a router rule for '/container/run'
-        overrides the default health check rather than colliding with
-        it, since both are merged into the same {rule: view} dict
-        before any of them touch self.app."""
+        """Merges DEFAULT_ROUTES with the hotloaded router's routes -
+        a router rule for '/container/run' overrides the default
+        health check rather than colliding with it - and returns a
+        dispatcher bound to the merged {rule: view} dict.
+
+        functions-framework's gen 1 HTTP signature type mounts a
+        single function at "/" and "/<path:path>" and calls it as
+        function(request) for every request path, regardless of any
+        routes Flask itself knows about (see _configure_app in
+        functions_framework/__init__.py) - so the object main.py
+        exposes as `main` has to be a request-aware dispatcher, not
+        one specific zero-argument view, or every path other than the
+        exact one that view was registered under would crash with a
+        "takes 0 positional arguments but 1 was given" TypeError.
+        """
         routes = dict(self.DEFAULT_ROUTES)
         routes.update(self.load_router_routes())
+        self.routes = routes
 
-        for rule, view_func in routes.items():
-            self.app.add_url_rule(rule, endpoint=rule, view_func=view_func)
+        return self.dispatch
 
-        return routes['/container/run']
+    def dispatch(self, request):
+        view_func = self.routes.get(request.path)
+        if view_func is None:
+            return "Not Found", 404
+        return view_func()
 
     def build(self):
         self.build_app()
