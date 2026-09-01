@@ -1,3 +1,3 @@
-from .app import CloudFunctionApp
+from pyspace.service import CloudFunctionApp, Service
 
-__all__ = ["CloudFunctionApp"]
+__all__ = ["CloudFunctionApp", "Service"]

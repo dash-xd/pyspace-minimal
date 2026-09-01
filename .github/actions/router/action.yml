@@ -1,17 +1,17 @@
 name: Router
 description: >-
-  Adds a router package to requirements.txt so main.py's ROUTER_MODULE
-  hook can import it at request time. The Cloud Function's
-  ROUTER_MODULE environment variable (set alongside this, e.g. in
-  Terraform) is what actually points main.py at it - this action just
-  makes sure the package is installed.
+  Adds an importable Python router package to requirements.txt for
+  pyspace deployment composition. ROUTER_MODULE selects the module at
+  instance initialization, while pyspace's runtime registry can also
+  register any installed module later without mutating Flask's URL map.
 
 inputs:
   router-package:
     description: >-
       pip requirement spec for the router package, e.g.
-      "git+https://github.com/dash-xd/gcp-python-function-inspector.git@main".
-      Leave empty to deploy with nothing hooked in.
+      "git+https://github.com/dash-xd/gcp-python-function-inspector.git@<sha>".
+      Prefer an immutable revision for qualification/deployment composition.
+      Leave empty to keep the pyspace shell application-free.
     required: false
     default: ""
   working-directory:
