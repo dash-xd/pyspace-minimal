@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import http.client
 import os
+import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlencode
 
 from flask import Response
 
@@ -49,6 +51,7 @@ class GospaceConfig:
     binary: str
     binary_sha256: str
     socket_path: str
+    control_token: str
     request_timeout: float = 10.0
     ready_timeout: float = 5.0
 
@@ -70,10 +73,15 @@ class GospaceConfig:
         readable = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name)[:40]
         suffix = hashlib.sha256(name.encode()).hexdigest()[:12]
         safe_name = f"{readable or 'gospace'}-{suffix}"
+        # If the deployment did not configure a public/runtime-load control
+        # token, still give pyspace a private per-instance token for the local
+        # non-executing route resolver.
+        control_token = os.environ.get("GOSPACE_CONTROL_TOKEN") or secrets.token_urlsafe(32)
         return cls(
             binary=binary,
             binary_sha256=file_sha256(binary),
             socket_path=str(Path(socket_dir) / f"{safe_name}.sock"),
+            control_token=control_token,
             request_timeout=request_timeout,
             ready_timeout=ready_timeout,
         )
@@ -101,11 +109,36 @@ class GospaceBackend:
             (self.config.binary, "--unix-socket", self.config.socket_path),
             socket_path=self.config.socket_path,
             executable_sha256=self.config.binary_sha256,
+            env={"GOSPACE_CONTROL_TOKEN": self.config.control_token},
             ready_timeout=self.config.ready_timeout,
         )
 
-    def __call__(self, request):
+    def _ensure(self) -> None:
         self.supervisor.acquire(self.process_key, self._spec())
+
+    def matches(self, request) -> bool:
+        """Ask gospace's metadata index whether this request has an owner."""
+        self._ensure()
+        query = urlencode({"method": request.method, "path": request.full_path.rstrip("?")})
+        conn = UnixHTTPConnection(self.config.socket_path, timeout=self.config.request_timeout)
+        try:
+            conn.request(
+                "GET",
+                f"/_gospace/resolve?{query}",
+                headers={"X-Gospace-Control-Token": self.config.control_token},
+            )
+            upstream = conn.getresponse()
+            upstream.read()
+            if upstream.status == 200:
+                return True
+            if upstream.status == 404:
+                return False
+            raise RuntimeError(f"gospace route resolver returned HTTP {upstream.status}")
+        finally:
+            conn.close()
+
+    def __call__(self, request):
+        self._ensure()
         return self._proxy(request)
 
     def _proxy(self, request):
