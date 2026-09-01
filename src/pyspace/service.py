@@ -18,16 +18,13 @@ from .supervisor import ProcessSupervisor
 CONTROL_PREFIX = "/_pyspace/"
 CONTROL_TOKEN_HEADER = "X-Pyspace-Control-Token"
 APP_HEADER = "X-Pyspace-App"
+MODULE_HINT_HEADER = "X-Pyspace-Module"
+GOSPACE_HINT_HEADER = "X-Pyspace-Gospace-Binary"
 HEALTH_PATH = "/_pyspace/healthz"
 
 
 class Service:
-    """Stable Gen 1 HTTP entry point with runtime-selectable applications.
-
-    No application is built into pyspace-minimal. Applications arrive either
-    through deployment composition (environment/importable modules or a bundled
-    gospace binary) or through the privileged runtime registration methods.
-    """
+    """Stable Gen 1 HTTP entry point with runtime-selectable applications."""
 
     def __init__(
         self,
@@ -50,9 +47,6 @@ class Service:
         self.env: Environment | None = None
 
     def build_app(self):
-        # Functions Framework creates and pushes this Flask app before importing
-        # the user's main.py. pyspace deliberately reuses that app instead of
-        # creating a competing WSGI server inside the Cloud Function process.
         self.app = current_app
         return self.app
 
@@ -73,8 +67,6 @@ class Service:
                 raise TypeError(f"view for {rule!r} is not callable")
             normalized[rule] = view
 
-        # Capture a new immutable dict. Later mutation of the source module's
-        # ROUTES mapping does not silently change an already-registered app.
         frozen_routes = dict(normalized)
 
         def handler(request):
@@ -117,7 +109,6 @@ class Service:
         self.registry.activate(name)
 
     def compose_from_environment(self) -> None:
-        """Compose deployment-provided applications without built-in defaults."""
         module_name = os.environ.get(self.router_env_var)
         if module_name:
             name = os.environ.get("PYSPACE_ROUTER_NAME", module_name)
@@ -155,8 +146,48 @@ class Service:
             try:
                 return self.registry.dispatch(requested, request)
             except UnknownApplication:
+                result = self._load_from_hint(requested, request)
+                if result is not None:
+                    return result
                 return "unknown application", 404
         return self.registry.dispatch_active(request)
+
+    def _load_from_hint(self, name: str, request):
+        """Load a missing application from this request, then dispatch it.
+
+        The hint is only consulted when name is not already registered. A cold
+        request therefore carries both its loader hint and its actual payload;
+        there is no separate registration request.
+        """
+        module_name = request.headers.get(MODULE_HINT_HEADER)
+        gospace_binary = request.headers.get(GOSPACE_HINT_HEADER)
+        if bool(module_name) == bool(gospace_binary):
+            # No hint, or two conflicting hints.
+            return None if not module_name and not gospace_binary else ("exactly one pyspace loader hint is allowed", 400)
+        if not self._authorized(request):
+            return "Not Found", 404
+
+        try:
+            if module_name:
+                self.register_module(name, module_name)
+            else:
+                self.register_gospace(
+                    name,
+                    gospace_binary,
+                    socket_dir=os.environ.get("PYSPACE_SOCKET_DIR", "/tmp/pyspace"),
+                    request_timeout=float(os.environ.get("PYSPACE_GOSPACE_REQUEST_TIMEOUT", "10")),
+                    ready_timeout=float(os.environ.get("PYSPACE_GOSPACE_READY_TIMEOUT", "5")),
+                )
+        except ApplicationExists:
+            # A concurrent request won the immutable registration race.
+            pass
+        except (ImportError, OSError, TypeError, ValueError) as exc:
+            return str(exc), 400
+
+        try:
+            return self.registry.dispatch(name, request)
+        except UnknownApplication:
+            return "unknown application", 404
 
     def _authorized(self, request) -> bool:
         if not self.control_token:
@@ -166,7 +197,6 @@ class Service:
 
     def _control(self, request):
         if not self._authorized(request):
-            # Match gospace's hidden-control-plane behavior.
             return "Not Found", 404
 
         if request.path == "/_pyspace/apps" and request.method == "GET":
@@ -236,5 +266,4 @@ class Service:
         return "Not Found", 404
 
 
-# Compatibility name retained for existing consumers of cloud_function_app.
 CloudFunctionApp = Service
