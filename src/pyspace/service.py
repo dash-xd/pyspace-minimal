@@ -45,7 +45,7 @@ class Service:
         self.supervisor = supervisor or ProcessSupervisor()
         self.app = None
         self.env: Environment | None = None
-        self._python_routes: dict[str, str] = {}
+        self._python_routes: dict[str, list[str]] = {}
         self._gospace_apps: list[str] = []
 
     def build_app(self):
@@ -67,9 +67,6 @@ class Service:
                 raise ValueError(f"invalid route rule {rule!r}")
             if not callable(view):
                 raise TypeError(f"view for {rule!r} is not callable")
-            owner = self._python_routes.get(rule)
-            if owner is not None and owner != name:
-                raise ValueError(f"route {rule!r} is already owned by {owner!r}")
             normalized[rule] = view
 
         frozen_routes = dict(normalized)
@@ -82,7 +79,7 @@ class Service:
 
         self.registry.register(name, handler)
         for rule in frozen_routes:
-            self._python_routes[rule] = name
+            self._python_routes.setdefault(rule, []).append(name)
 
     def register_module(self, name: str, module_name: str) -> None:
         module = importlib.import_module(module_name)
@@ -159,22 +156,23 @@ class Service:
                     return loaded
                 return "unknown application", 404
 
-        # Python ownership is an exact local lookup and never executes a
-        # candidate merely to discover whether it owns this request.
-        owner = self._python_routes.get(request.path)
-        if owner is not None:
+        # Python ownership is known locally without executing candidates. When
+        # multiple apps intentionally expose the same path, the active app wins;
+        # otherwise registration order provides the stable fallback.
+        active = self.registry.active()
+        owners = self._python_routes.get(request.path, ())
+        if active in owners:
+            return self.registry.dispatch(active, request)
+        for owner in owners:
             return self.registry.dispatch(owner, request)
 
         # Gospace exposes the same property over its private Unix socket: ask
         # its route metadata index first, then execute exactly one selected app.
-        active = self.registry.active()
         for name in self._ordered_gospace_apps(active):
             backend = self.registry.handler(name)
             if isinstance(backend, GospaceBackend) and backend.matches(request):
                 return backend(request)
 
-        # Loader hints are only an optimization/cold-resolution mechanism after
-        # all already-known local route sources miss.
         module_hint = request.headers.get(MODULE_HINT_HEADER)
         gospace_hint = request.headers.get(GOSPACE_HINT_HEADER)
         if module_hint or gospace_hint:
