@@ -27,6 +27,8 @@ _HOP_BY_HOP = {
 _INTERNAL_HEADERS = {
     "x-pyspace-app",
     "x-pyspace-control-token",
+    "x-pyspace-module",
+    "x-pyspace-gospace-binary",
 }
 
 
