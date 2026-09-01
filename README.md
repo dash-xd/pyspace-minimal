@@ -1,6 +1,8 @@
 # pyspace-minimal
 
-`pyspace-minimal` is a Python 3.12 Google Cloud Functions Gen 1 host with no built-in app. A request can name an app that is already warm, or carry a loader hint that lets pyspace register it and handle that same request immediately.
+`pyspace-minimal` is a Python 3.12 Google Cloud Functions Gen 1 host with no built-in app.
+
+Normal requests do not need routing headers. Pyspace first looks for the route in already-registered Python routers, then asks any registered gospace apps. Hints are optional shortcuts for a caller that already knows what should handle the request.
 
 ## Python router
 
@@ -18,11 +20,19 @@ ROUTES = {
 }
 ```
 
-If it is not registered yet, the first request carries the app name, module hint, control token, and normal request payload together:
+If `hello_router` is already registered, this is enough:
 
 ```http
 POST /hello
-X-Pyspace-App: hello-v1
+Content-Type: text/plain
+
+abc
+```
+
+If the route is not registered yet, the same request can carry a loader hint:
+
+```http
+POST /hello
 X-Pyspace-Module: hello_router
 X-Pyspace-Control-Token: <PYSPACE_CONTROL_TOKEN>
 Content-Type: text/plain
@@ -30,25 +40,16 @@ Content-Type: text/plain
 abc
 ```
 
-The response is:
+Pyspace imports the module, registers it under its module name, then handles that same request. No separate registration call is required.
 
-```text
-payload=abc
-```
-
-Pyspace imports `hello_router`, registers it as `hello-v1`, then sends the same request to `/hello`. There is no separate registration request.
-
-Once the instance is warm, only the app name is needed:
+`X-Pyspace-App` is optional. Use it when you already know the exact registered app and want to skip catchall discovery:
 
 ```http
 POST /hello
 X-Pyspace-App: hello-v1
-Content-Type: text/plain
-
-xyz
 ```
 
-You can still pre-register the same router at deployment:
+You can also pre-register the router at deployment:
 
 ```text
 ROUTER_MODULE=hello_router
@@ -56,52 +57,51 @@ PYSPACE_ROUTER_NAME=hello-v1
 PYSPACE_ROUTER_ACTIVATE=true
 ```
 
-## Gospace app
+## Gospace
 
-A request can use the same pattern to lazy-load the gospace executable:
+If a gospace executable is already registered with pyspace, ordinary requests that do not match a Python route fall through to gospace automatically.
+
+A cold request can supply the executable path as a hint:
 
 ```http
-POST /...
-X-Pyspace-App: gospace-v1
+POST /users/42
 X-Pyspace-Gospace-Binary: /workspace/bin/gospace
 X-Pyspace-Control-Token: <PYSPACE_CONTROL_TOKEN>
-...
 ```
 
-On a miss, pyspace registers the executable, starts it on a Unix socket, and forwards that same request. If `gospace-v1` is already warm, `X-Pyspace-Gospace-Binary` and the pyspace control token are not needed.
+Pyspace registers/spawns gospace and forwards the same request over its Unix socket.
 
-The forwarded request may also contain gospace's own router hint, so one cold request can do:
+If the request also needs a cold WASM router inside gospace, it can carry gospace's own WASM hint in that same request. After both caches are warm, an ordinary request such as:
+
+```http
+GET /users/42
+```
+
+can resolve through:
 
 ```text
-request + pyspace hint + gospace hint + WASM
-        |
-        v
-pyspace loads/spawns gospace if needed
-        |
-        v
-gospace loads the WASM router if needed
-        |
-        v
-original request payload runs through the router
+Python route lookup
+    -> miss
+registered gospace
+    -> registered native/WASM route lookup
+    -> match
 ```
 
-See `dash-xd/gospace` for the `X-Gospace-Router` multipart request format.
+## Resolution order
 
-## Request-scoped selection
+```text
+explicit X-Pyspace-App, if supplied
+    -> direct registered app
+    -> load from supplied pyspace hint on a miss
 
-`X-Pyspace-App` selects one app for one request without changing the default:
-
-```http
-GET /hello
-X-Pyspace-App: hello-v1
+otherwise
+    -> exact registered Python ROUTES match
+    -> registered gospace app(s)
+    -> optional Python/gospace loader hint
+    -> 404
 ```
 
-To change the default explicitly:
-
-```http
-POST /_pyspace/activate/hello-v1
-X-Pyspace-Control-Token: <PYSPACE_CONTROL_TOKEN>
-```
+Hints improve routing when the caller or a CDN already knows the destination, but they are not required for routes that the warm instance can discover itself.
 
 ## Cloud Function entry point
 
@@ -124,17 +124,15 @@ def main(request):
     return _dispatch(request)
 ```
 
-`PYSPACE_ROOT` is optional. Without it, pyspace uses the directory containing `main.py`. The wrapper is intentional: Functions Framework requires the exported `main` target itself to be a Python function rather than a bound method.
+`PYSPACE_ROOT` is optional. Without it, pyspace uses the directory containing `main.py`.
 
-## Hint headers
+## Optional headers
 
 ```text
-X-Pyspace-App             target app name
-X-Pyspace-Module          importable Python module, used only on a cache miss
-X-Pyspace-Gospace-Binary  gospace executable path, used only on a cache miss
-X-Pyspace-Control-Token   required only when a request causes a runtime load
+X-Pyspace-App             direct registered-app hint
+X-Pyspace-Module          importable Python module for a cold miss
+X-Pyspace-Gospace-Binary  gospace executable path for a cold miss
+X-Pyspace-Control-Token   required only when the request performs a runtime load
 ```
 
-Exactly one loader hint may be supplied on a cache miss. Registered app names are immutable for the lifetime of the instance.
-
-The older `/_pyspace/module/<name>` and `/_pyspace/gospace/<name>` control endpoints remain available for explicit management, but they are not required for lazy request dispatch.
+The explicit `/_pyspace/...` control endpoints remain available for management, but normal lazy routing does not require a registration request first.
