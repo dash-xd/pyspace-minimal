@@ -117,10 +117,14 @@ app = Service(
         path.dirname(path.abspath(__file__)),
     )
 )
-main = app.build()
+_dispatch = app.build()
+
+
+def main(request):
+    return _dispatch(request)
 ```
 
-`PYSPACE_ROOT` is optional. Without it, pyspace uses the directory containing `main.py`.
+`PYSPACE_ROOT` is optional. Without it, pyspace uses the directory containing `main.py`. The wrapper is intentional: Functions Framework requires the exported `main` target itself to be a Python function rather than a bound method.
 
 ## Hint headers
 
