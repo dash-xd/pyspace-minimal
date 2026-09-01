@@ -156,9 +156,6 @@ class Service:
                     return loaded
                 return "unknown application", 404
 
-        # Python ownership is known locally without executing candidates. When
-        # multiple apps intentionally expose the same path, the active app wins;
-        # otherwise registration order provides the stable fallback.
         active = self.registry.active()
         owners = self._python_routes.get(request.path, ())
         if active in owners:
@@ -166,12 +163,21 @@ class Service:
         for owner in owners:
             return self.registry.dispatch(owner, request)
 
-        # Gospace exposes the same property over its private Unix socket: ask
-        # its route metadata index first, then execute exactly one selected app.
-        for name in self._ordered_gospace_apps(active):
-            backend = self.registry.handler(name)
-            if isinstance(backend, GospaceBackend) and backend.matches(request):
+        ordered_gospace = list(self._ordered_gospace_apps(active))
+        if len(ordered_gospace) == 1:
+            # There is no ambiguity at the pyspace layer, so forward once and
+            # let gospace's own non-executing route index decide whether it owns
+            # the request. This avoids a resolver+request double UDS round trip.
+            backend = self.registry.handler(ordered_gospace[0])
+            if isinstance(backend, GospaceBackend):
                 return backend(request)
+        else:
+            # With multiple gospace applications, resolve ownership first so
+            # only one application process ever executes the request.
+            for name in ordered_gospace:
+                backend = self.registry.handler(name)
+                if isinstance(backend, GospaceBackend) and backend.matches(request):
+                    return backend(request)
 
         module_hint = request.headers.get(MODULE_HINT_HEADER)
         gospace_hint = request.headers.get(GOSPACE_HINT_HEADER)
