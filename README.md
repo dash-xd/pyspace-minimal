@@ -20,13 +20,21 @@ The Functions Framework still invokes one HTTP function for every path. Pyspace 
 The deployment entry point remains tiny:
 
 ```python
+import os
 from os import path
 
 from pyspace import Service
 
-app = Service(root=path.dirname(path.abspath(__file__)))
+app = Service(
+    root=os.environ.get(
+        "PYSPACE_ROOT",
+        path.dirname(path.abspath(__file__)),
+    )
+)
 main = app.build()
 ```
+
+The default root is therefore the directory containing the deployed `main.py`, preserving the original `Service(root=path.dirname(path.abspath(__file__)))` behavior. A composed deployment can override that default with `PYSPACE_ROOT` without modifying the entry point.
 
 `cloud_function_app.CloudFunctionApp` remains as a compatibility import, but `pyspace.Service` is the canonical API.
 
@@ -79,125 +87,66 @@ A bundled gospace binary can also be declared without starting it:
 
 ```text
 PYSPACE_GOSPACE_BINARY=/workspace/bin/gospace
-PYSPACE_GOSPACE_NAME=gospace
+PYSPACE_GOSPACE_NAME=gospace-v1
 PYSPACE_GOSPACE_ACTIVATE=true
 ```
 
-Registration is cheap. The Go process is not spawned until a request actually dispatches to that application.
+The binary is hashed at registration time. The supervisor verifies that SHA-256 again immediately before each spawn, so an immutable application name cannot silently start different executable bytes later in the lifetime of the instance.
 
-## Runtime hotloading
+## Runtime composition
 
-Programmatic registration is the primary primitive. For controlled development/runtime composition, setting `PYSPACE_CONTROL_TOKEN` also enables a hidden control surface. Requests without the exact `X-Pyspace-Control-Token` receive `404` so the management surface is not discoverable merely because the function is reachable.
+Runtime registration is optional and disabled unless `PYSPACE_CONTROL_TOKEN` is configured. Control requests use `X-Pyspace-Control-Token`; unauthorized control paths deliberately look absent.
 
-The current endpoints are:
+An already-importable Python router can be registered with:
 
 ```text
-GET  /_pyspace/apps
-POST /_pyspace/activate/<name>
 POST /_pyspace/module/<name>
+{"module":"package.module","activate":true}
+```
+
+An already-present gospace executable can be registered with:
+
+```text
 POST /_pyspace/gospace/<name>
+{"binary":"/tmp/gospace","activate":true}
 ```
 
-Register an already-installed Python module:
+Pyspace deliberately does not contain a package downloader, Go compiler, or artifact transport. Those are composition concerns. Runtime registration only turns an implementation that is already available to the instance into a named application.
 
-```json
-{
-  "module": "my_router",
-  "activate": true
-}
-```
+## Gospace supervisor
 
-Register a bundled/local gospace executable:
-
-```json
-{
-  "binary": "/workspace/bin/gospace",
-  "activate": true
-}
-```
-
-The control surface does not install packages, download executables, or create deployment artifacts. It only composes resources already made available by the deployment/runtime. Artifact acquisition belongs to a higher-level composition system.
-
-## Gospace supervision
-
-`ProcessSupervisor` is deliberately much smaller than systemd/s6. It implements request-driven reconciliation:
+The gospace backend is request-driven rather than a conventional daemon supervisor:
 
 ```text
-request needs gospace
+request for gospace-v1
         |
         v
-process cached and socket healthy?
-        | yes
-        +-----------------> reuse
-        |
-        no
-        v
-spawn exact argv once
-        |
-wait for Unix socket readiness
+pyspace registry
         |
         v
-proxy original HTTP request
-```
-
-The supervisor uses a per-key lock, `subprocess.Popen(..., start_new_session=True)`, inherited stdout/stderr, Unix-socket readiness probing, and bounded SIGTERM -> SIGKILL cleanup. It has no background restart loop. If a child dies while the instance remains warm, the next request reconciles it. If the Cloud Function instance disappears, both Python and the child disappear together.
-
-`gospace`'s worker CLI on `codex/modular-router-worker-wasm` supports:
-
-```text
---unix-socket /tmp/pyspace/gospace.sock
-```
-
-Pyspace starts it that way and proxies the incoming method, path/query, headers, and body over the local socket. Gospace remains responsible for its own native/WASM router registry and execution. Pyspace does not understand the gospace WASM ABI.
-
-The resulting boundary is:
-
-```text
-Google Cloud Functions Gen 1
+process supervisor
+   |          |
+ alive      absent/dead
+   |          |
+ reuse      spawn
+   |          |
+   +----+-----+
         |
         v
-Python 3.12 / pyspace
+Unix-domain HTTP socket
         |
-        +-- Python router application (in-process)
-        |
-        `-- lazy gospace process
-                |
-                `-- native / pre-registered WASM / runtime WASM router
+        v
+     gospace
 ```
 
-A future Redis HTTP-dispatch path can therefore target the gospace application through pyspace while keeping the Redis, Python supervision, gospace router loading, and WASM guest responsibilities separate.
+There is no background restart loop. If the Cloud Functions instance is frozen or destroyed, the child process is merely lost instance-local cache state. The next request on a surviving/new instance reconciles what it needs.
 
-## Composition and qualification boundary
+The supervisor serializes spawn per process key, starts each child in its own session, probes Unix-socket readiness, inherits stdout/stderr so child logs reach the platform logger, and terminates the complete process group during explicit cleanup.
 
-This repository should remain a reusable host primitive, not a standing smoke-test deployment. The intended qualification model follows the same pattern used by `dash-xd/github-cdn` and `xd-dash/huram-abi-master`'s `worktree-automation`:
+Pyspace proxies the original HTTP method, path/query, body and ordinary headers to gospace. Hop-by-hop headers and pyspace's own selection/control headers are not forwarded.
 
-1. lock mutable source refs to immutable SHAs;
-2. compose a disposable deployment repository from those exact inputs;
-3. attach the profile-owned deployment/qualification harness;
-4. deploy and prove the real runtime behavior;
-5. tear down by default, with retention handled explicitly by the sandbox lifecycle policy;
-6. only promote a composition after an exact successful qualification.
+## Composition and qualification
 
-That future composition may use Android's Repo tool to materialize `pyspace-minimal`, `gospace`, and other components from a manifest. Neither pyspace nor gospace needs to own that orchestration now.
+This repository should not own live cloud smoke-test infrastructure. The intended qualification boundary follows `huram-abi-master`'s `worktree-automation` model: resolve pyspace and gospace inputs to exact commits, archive immutable component worktrees into a generated deployment repository, build the gospace executable there, and deploy the resulting Python Functions Framework composition.
 
-## Install and test
-
-```bash
-pip install .
-```
-
-For development:
-
-```bash
-pip install -e '.[test]'
-pytest
-```
-
-The deployment requirements remain minimal:
-
-```text
-functions-framework==3.*
-.
-```
-
-Deploy the composed source directory as a Python 3.12 Gen 1 HTTP function with `main` as the entry point.
+That keeps the component repositories reusable and makes the generated deployment repository the evidence-bearing unit. A future Android `repo` manifest can describe the same pinned multi-repository composition without changing pyspace or gospace runtime semantics.
