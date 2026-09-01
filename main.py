@@ -11,4 +11,9 @@ app = Service(
         path.dirname(path.abspath(__file__)),
     )
 )
-main = app.build()
+_dispatch = app.build()
+
+
+def main(request):
+    """Google Functions Framework requires the exported target to be a function."""
+    return _dispatch(request)
